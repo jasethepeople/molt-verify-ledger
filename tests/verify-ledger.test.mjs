@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, generateKeyPairSync, sign } from 'node:crypto';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -17,19 +17,17 @@ function makeKeypair() {
 }
 
 function makeEvent({ seq, prevHash, signer, publicKeyHex = signer.publicKeyHex }) {
-  const body = {
+  const signedBody = {
     seq,
     ts: 1700000000 + seq,
     type: 'record.created',
-    actor: 'test-suite',
     payload: { entry: `event-${seq}`, values: [seq, true] },
-    prev_hash: prevHash,
-    pub: publicKeyHex,
+    actor: 'test-suite',
   };
-  const canonicalBody = canonicalizeJsonText(JSON.stringify(body));
+  const canonicalBody = canonicalizeJsonText(JSON.stringify(signedBody));
   const hash = createHash('sha256').update(prevHash + canonicalBody, 'utf8').digest('hex');
-  const sig = sign(null, Buffer.from(canonicalBody, 'utf8'), signer.privateKey).toString('hex');
-  return { ...body, sig, hash };
+  const sig = sign(null, Buffer.from(hash, 'hex'), signer.privateKey).toString('hex');
+  return { seq, ts: signedBody.ts, type: signedBody.type, actor: signedBody.actor, payload: signedBody.payload, prev_hash: prevHash, pub: publicKeyHex, sig, hash };
 }
 
 function makeLedger(count = 3) {
@@ -77,6 +75,13 @@ test('valid three-event ledger passes every event', async t => {
   ]);
 });
 
+test('accepts the shared Camp 1 sample used by molt-verify', async t => {
+  const sample = await readFile(new URL('./fixtures/camp1-sample-good.events.jsonl', import.meta.url), 'utf8');
+  const result = await runLedger(t, sample);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /^VALID: 2 events$/m);
+});
+
 test('tampered payload fails its hash and signature and breaks the next link', async t => {
   const lines = makeLedger();
   const contents = mutateLine(lines, 1, event => { event.payload.entry = 'event-1!'; });
@@ -91,6 +96,13 @@ test('broken previous hash is reported', async t => {
   const contents = mutateLine(lines, 1, event => { event.prev_hash = zeroHash; });
   const result = await runLedger(t, contents);
   assertFail(result, 1, ['chain broken']);
+});
+
+test('unsafe timestamp is rejected', async t => {
+  const lines = makeLedger(1);
+  const contents = mutateLine(lines, 0, event => { event.ts = Number.MAX_SAFE_INTEGER + 1; });
+  const result = await runLedger(t, contents);
+  assertFail(result, 0, ['bad field format']);
 });
 
 test('wrong sequence is reported', async t => {

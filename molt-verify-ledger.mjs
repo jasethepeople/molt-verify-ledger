@@ -36,8 +36,8 @@ function checkEvent(line, index, previousRecomputedHash) {
     && FIELD_NAMES.every(field => Object.hasOwn(event, field));
   if (!fieldsAreExact) failures.push('wrong fields');
 
-  const formatsAreValid = Number.isInteger(event.seq) && event.seq >= 0
-    && Number.isInteger(event.ts) && event.ts >= 0
+  const formatsAreValid = Number.isSafeInteger(event.seq) && event.seq >= 0
+    && Number.isSafeInteger(event.ts) && event.ts >= 0
     && typeof event.type === 'string'
     && typeof event.actor === 'string'
     && typeof event.prev_hash === 'string' && HASH_FORMAT.test(event.prev_hash)
@@ -50,7 +50,7 @@ function checkEvent(line, index, previousRecomputedHash) {
 
   if (event.seq === 0) {
     if (event.prev_hash !== ZERO_HASH) failures.push('chain broken');
-  } else if (Number.isInteger(event.seq) && event.seq > 0) {
+  } else if (Number.isSafeInteger(event.seq) && event.seq > 0) {
     if (previousRecomputedHash === null || event.prev_hash !== previousRecomputedHash) {
       failures.push('chain broken');
     }
@@ -59,15 +59,21 @@ function checkEvent(line, index, previousRecomputedHash) {
   }
 
   let canonicalBody;
-  let recomputedHash = null;
-  if (parsed !== null && typeof parsed === 'object') {
-    const body = Object.fromEntries(Object.entries(event).filter(([key]) => key !== 'sig' && key !== 'hash'));
+  if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+    const signedBody = {
+      seq: event.seq,
+      ts: event.ts,
+      type: event.type,
+      payload: event.payload,
+      actor: event.actor,
+    };
     try {
-      canonicalBody = canonicalizeJsonText(JSON.stringify(body));
+      canonicalBody = canonicalizeJsonText(JSON.stringify(signedBody));
     } catch {
       canonicalBody = undefined;
     }
   }
+  let recomputedHash = null;
   if (canonicalBody !== undefined && typeof event.prev_hash === 'string') {
     recomputedHash = createHash('sha256')
       .update(event.prev_hash + canonicalBody, 'utf8')
@@ -76,7 +82,7 @@ function checkEvent(line, index, previousRecomputedHash) {
   if (recomputedHash === null || event.hash !== recomputedHash) failures.push('hash mismatch');
 
   let signatureIsValid = false;
-  if (canonicalBody !== undefined && typeof event.pub === 'string' && HASH_FORMAT.test(event.pub)
+  if (recomputedHash !== null && typeof event.pub === 'string' && HASH_FORMAT.test(event.pub)
       && typeof event.sig === 'string' && SIGNATURE_FORMAT.test(event.sig)) {
     try {
       const publicKey = createPublicKey({
@@ -86,7 +92,7 @@ function checkEvent(line, index, previousRecomputedHash) {
       });
       signatureIsValid = verifySignature(
         null,
-        Buffer.from(canonicalBody, 'utf8'),
+        Buffer.from(recomputedHash, 'hex'),
         publicKey,
         Buffer.from(event.sig, 'hex'),
       );
